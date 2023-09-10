@@ -1,5 +1,5 @@
 import os
-import random
+import re
 import shutil
 from bisect import bisect_right
 from copy import copy
@@ -178,6 +178,7 @@ class FoundryProvider(SubprocessProvider, Web3Provider, TestProviderAPI):
     def uri(self) -> str:
         if self._host is not None:
             return self._host
+        # TODO clean this mess, uri shouldn't return "auto"
         if config_host := self.config.host:
             if config_host == "auto":
                 self._host = "auto"
@@ -196,6 +197,22 @@ class FoundryProvider(SubprocessProvider, Web3Provider, TestProviderAPI):
         else:
             self._host = f"http://127.0.0.1:{DEFAULT_PORT}"
         return self._host
+
+    def consume_stdout_queue(self):
+        # FIXME ape: only works with -v DEBUG, otherwise ape sends subprocess output to /dev/null
+        if self.stdout_queue is None:
+            return
+
+        for line in self.stdout_queue:
+            output = line.decode("utf8").strip()
+            logger.debug(output)
+            self._stdout_logger.debug(output)
+            # connected
+            if match := re.match(r"Listening on (.+)", output):
+                self._host = f"http://{match.group(1)}"
+
+            if self.stdout_queue is not None:
+                self.stdout_queue.task_done()
 
     @property
     def priority_fee(self) -> int:
@@ -240,30 +257,7 @@ class FoundryProvider(SubprocessProvider, Web3Provider, TestProviderAPI):
         Start the foundry process and verify it's up and accepting connections.
         **NOTE**: Must set port before calling 'super().connect()'.
         """
-
-        warning = "`port` setting is deprecated. Please use `host` key that includes the port."
-        if "port" in self.provider_settings:
-            # TODO: Can remove after 0.7.
-            logger.warning(warning)
-            self._host = f"http://127.0.0.1:{self.provider_settings['port']}"
-
-        elif self.config.port != DEFAULT_PORT and self.config.host is not None:
-            raise FoundryProviderError(
-                "Cannot use deprecated `port` field with `host`. "
-                "Place `port` at end of `host` instead."
-            )
-
-        elif self.config.port != DEFAULT_PORT:
-            # We only get here if the user configured a port without a host,
-            # the old way of doing it. TODO: Can remove after 0.7.
-            logger.warning(warning)
-            if self.config.port not in (None, "auto"):
-                self._host = f"http://127.0.0.1:{self.config.port}"
-            else:
-                # This will trigger selecting a random port on localhost and trying.
-                self._host = "auto"
-
-        elif "host" in self.provider_settings:
+        if "host" in self.provider_settings:
             self._host = self.provider_settings["host"]
 
         elif "APE_FOUNDRY_HOST" in os.environ:
@@ -349,10 +343,6 @@ class FoundryProvider(SubprocessProvider, Web3Provider, TestProviderAPI):
         client_version = self._web3.client_version.lower()
         if "anvil" in client_version:
             self._web3.eth.set_gas_price_strategy(rpc_gas_price_strategy)
-        elif self._port is not None:
-            raise FoundryProviderError(
-                f"Port '{self._port}' already in use by another process that isn't an Anvil node."
-            )
         else:
             # Not sure if possible to get here.
             raise FoundryProviderError("Failed to start Anvil process.")
@@ -373,36 +363,9 @@ class FoundryProvider(SubprocessProvider, Web3Provider, TestProviderAPI):
             self._web3.middleware_onion.inject(geth_poa_middleware, layer=0)
 
     def _start(self):
-        use_random_port = self._host == "auto"
-        if use_random_port:
-            self._host = None
-
-            if DEFAULT_PORT not in self.attempted_ports:
-                # First, attempt the default port before anything else.
-                self._host = f"127.0.0.1:{DEFAULT_PORT}"
-
-            # Pick a random port
-            port = random.randint(EPHEMERAL_PORTS_START, EPHEMERAL_PORTS_END)
-            max_attempts = 25
-            attempts = 0
-            while port in self.attempted_ports:
-                port = random.randint(EPHEMERAL_PORTS_START, EPHEMERAL_PORTS_END)
-                attempts += 1
-                if attempts == max_attempts:
-                    ports_str = ", ".join([str(p) for p in self.attempted_ports])
-                    raise FoundryProviderError(
-                        f"Unable to find an available port. Ports tried: {ports_str}"
-                    )
-
-            self.attempted_ports.append(port)
-            self._host = f"http://127.0.0.1:{port}"
-
-        elif self._host is not None and ":" in self._host and self._port is not None:
-            # Append the one and only port to the attempted ports list, for honest keeping.
-            self.attempted_ports.append(self._port)
-
-        else:
-            self._host = f"http://127.0.0.1:{DEFAULT_PORT}"
+        if self._host == "auto":
+            # ask the system for a free port, it will be updated later from the process output
+            self._host = "http://127.0.0.1:0"
 
         if "127.0.0.1" in self._host or "localhost" in self._host:
             # Start local process
@@ -419,8 +382,10 @@ class FoundryProvider(SubprocessProvider, Web3Provider, TestProviderAPI):
     def build_command(self) -> List[str]:
         cmd = [
             self.anvil_bin,
+            "--host",
+            URL(self._host).host,
             "--port",
-            f"{self._port or DEFAULT_PORT}",
+            self._host.split(":")[-1],  # note: don't change to URL, it replaces port 0 with 80
             "--mnemonic",
             self.mnemonic,
             "--accounts",
