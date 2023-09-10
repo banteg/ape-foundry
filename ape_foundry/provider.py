@@ -59,9 +59,6 @@ from ape_foundry.constants import EVM_VERSION_BY_NETWORK
 from .exceptions import FoundryNotInstalledError, FoundryProviderError, FoundrySubprocessError
 from .utils import to_bytes32
 
-EPHEMERAL_PORTS_START = 49152
-EPHEMERAL_PORTS_END = 60999
-DEFAULT_PORT = 8545
 FOUNDRY_CHAIN_ID = 31337
 
 
@@ -72,10 +69,7 @@ class FoundryForkConfig(PluginConfig):
 
 
 class FoundryNetworkConfig(PluginConfig):
-    port: Optional[Union[int, Literal["auto"]]] = DEFAULT_PORT
-    """Deprecated. Use ``host`` config."""
-
-    host: Optional[Union[str, Literal["auto"]]] = None
+    host: Optional[Union[str, Literal["auto"]]] = "auto"
     """The host address or ``"auto"`` to use localhost with a random port (with attempts)."""
 
     manage_process: bool = True
@@ -150,10 +144,6 @@ class FoundryProvider(SubprocessProvider, Web3Provider, TestProviderAPI):
         except ValueError:
             # Likely isn't a real URI.
             return self.uri
-
-    @property
-    def _port(self) -> Optional[int]:
-        return URL(self.uri).port
 
     @property
     def chain_id(self) -> int:
